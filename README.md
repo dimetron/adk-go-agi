@@ -4,5 +4,4 @@
 
 ## Getting Started
 
-TBD
-
+use `make run` to start the AGI agent.
