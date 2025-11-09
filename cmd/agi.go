@@ -20,21 +20,37 @@ import (
 	"os"
 
 	"com.github.dimetron.adk-go-agi/pkg/agents"
+	"com.github.dimetron.adk-go-agi/pkg/model/ollama"
 	"google.golang.org/adk/cmd/launcher/adk"
 	"google.golang.org/adk/cmd/launcher/full"
-	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/server/restapi/services"
-	"google.golang.org/genai"
 )
 
 func main() {
 	ctx := context.Background()
 
-	// Initialize the Gemini model
-	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{})
-	if err != nil {
-		log.Fatalf("failed to create model: %s", err)
+	// Get model name from environment variable or use default
+	modelName := os.Getenv("OLLAMA_MODEL")
+	if modelName == "" {
+		modelName = "llama2" // Default model
 	}
+
+	// Get Ollama base URL from environment variable or use default
+	baseURL := os.Getenv("OLLAMA_BASE_URL")
+	if baseURL == "" {
+		baseURL = "http://localhost:11434"
+	}
+
+	// Initialize the Ollama model
+	model, err := ollama.NewModel(ctx, ollama.Config{
+		BaseURL:   baseURL,
+		ModelName: modelName,
+	})
+	if err != nil {
+		log.Fatalf("failed to create Ollama model: %s", err)
+	}
+
+	log.Printf("Using Ollama model: %s at %s", modelName, baseURL)
 
 	// Create the code pipeline agent using the factory function
 	rootAgent, err := agents.NewCodePipelineAgent(agents.PipelineConfig{

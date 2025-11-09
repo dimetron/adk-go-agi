@@ -3,6 +3,7 @@ module com.github.dimetron.adk-go-agi
 go 1.25.3
 
 require (
+	github.com/ollama/ollama v0.5.7
 	github.com/onsi/ginkgo/v2 v2.20.0
 	github.com/onsi/gomega v1.34.1
 	google.golang.org/adk v0.1.0
