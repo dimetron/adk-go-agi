@@ -45,19 +45,28 @@ func NewCodePipelineAgent(config PipelineConfig) (agent.Agent, error) {
 
 	// Create sub-agents
 	slog.Info("Creating design agent")
-	newDesignAgent, err := newDesignAgent(config.Model)
+	designAgent, err := newDesignAgent(config.Model)
 	if err != nil {
 		slog.Error("Failed to create design agent", "error", err)
 		return nil, err
 	}
+	if designAgent == nil {
+		slog.Error("Design agent is nil despite no error")
+		return nil, fmt.Errorf("design agent creation returned nil")
+	}
+	slog.Info("Design agent created successfully")
 
-	// Create sub-agents
 	slog.Info("Creating code writer agent")
 	codeWriterAgent, err := newCodeWriterAgent(config.Model)
 	if err != nil {
 		slog.Error("Failed to create code writer agent", "error", err)
 		return nil, err
 	}
+	if codeWriterAgent == nil {
+		slog.Error("Code writer agent is nil despite no error")
+		return nil, fmt.Errorf("code writer agent creation returned nil")
+	}
+	slog.Info("Code writer agent created successfully")
 
 	slog.Info("Creating TDD expert agent")
 	tddExpertAgent, err := newTDDExpertAgent(config.Model)
@@ -65,6 +74,11 @@ func NewCodePipelineAgent(config PipelineConfig) (agent.Agent, error) {
 		slog.Error("Failed to create TDD expert agent", "error", err)
 		return nil, err
 	}
+	if tddExpertAgent == nil {
+		slog.Error("TDD expert agent is nil despite no error")
+		return nil, fmt.Errorf("TDD expert agent creation returned nil")
+	}
+	slog.Info("TDD expert agent created successfully")
 
 	slog.Info("Creating code reviewer agent")
 	codeReviewerAgent, err := newCodeReviewerAgent(config.Model)
@@ -72,24 +86,62 @@ func NewCodePipelineAgent(config PipelineConfig) (agent.Agent, error) {
 		slog.Error("Failed to create code reviewer agent", "error", err)
 		return nil, err
 	}
+	if codeReviewerAgent == nil {
+		slog.Error("Code reviewer agent is nil despite no error")
+		return nil, fmt.Errorf("code reviewer agent creation returned nil")
+	}
+	slog.Info("Code reviewer agent created successfully")
+
+	// Validate all agents are non-nil before assembling pipeline
+	subAgents := []agent.Agent{
+		designAgent,
+		codeWriterAgent,
+		tddExpertAgent,
+		codeReviewerAgent,
+	}
+
+	for i, ag := range subAgents {
+		if ag == nil {
+			err := fmt.Errorf("sub-agent at index %d is nil", i)
+			slog.Error("Agent validation failed", "error", err, "index", i)
+			return nil, err
+		}
+	}
 
 	slog.Info("Assembling sequential pipeline agent",
-		"sub_agents", 4,
+		"sub_agents", len(subAgents),
 		"pipeline_name", config.Name)
 
+	// Log each sub-agent for debugging
+	for i, ag := range subAgents {
+		slog.Info("Sub-agent details",
+			"index", i,
+			"name", ag.Name(),
+			"description", ag.Description())
+	}
+
 	// Create the sequential pipeline agent
-	return sequentialagent.New(sequentialagent.Config{
+	pipelineAgent, err := sequentialagent.New(sequentialagent.Config{
 		AgentConfig: agent.Config{
-			Name: config.Name,
-			SubAgents: []agent.Agent{
-				newDesignAgent,
-				codeWriterAgent,
-				tddExpertAgent,
-				codeReviewerAgent,
-			},
+			Name:        config.Name,
+			SubAgents:   subAgents,
 			Description: config.Description,
 		},
 	})
+	if err != nil {
+		slog.Error("Failed to create sequential pipeline agent", "error", err)
+		return nil, fmt.Errorf("sequential agent creation failed: %w", err)
+	}
+	if pipelineAgent == nil {
+		slog.Error("Sequential pipeline agent is nil despite no error")
+		return nil, fmt.Errorf("sequential pipeline agent creation returned nil")
+	}
+
+	slog.Info("Sequential pipeline agent created successfully",
+		"name", pipelineAgent.Name(),
+		"description", pipelineAgent.Description())
+
+	return pipelineAgent, nil
 }
 
 // newDesignAgent creates a design agent that creates a new design for the code
@@ -97,7 +149,7 @@ func newDesignAgent(model model.LLM) (agent.Agent, error) {
 	return llmagent.New(llmagent.Config{
 		Name:  "DesignAgent",
 		Model: model,
-		Instruction: `You are a Go Software Architect. Create a high-level design for a Go application. Work autonomously without asking for clarification.
+		Instruction: `You are a Go Software Architect. Create a high-level design for a Go application. Work completely autonomously without asking for clarification or user input.
 
 **Required Sections:**
 1. Architecture Overview - brief description
@@ -129,7 +181,9 @@ func newDesignAgent(model model.LLM) (agent.Agent, error) {
 - Follow Go standard layout
 - Minimize dependencies
 - Target >85% test coverage
-- Include concurrency where beneficial`,
+- Include concurrency where beneficial
+
+**IMPORTANT: Complete the entire design now. Do not ask for clarification. Provide a complete, detailed design document covering all required sections.**`,
 		Description: "Creates a new design for the code.",
 		OutputKey:   "design",
 	})
@@ -144,7 +198,7 @@ func newCodeWriterAgent(model model.LLM) (agent.Agent, error) {
 			tools.FileReadTool(),
 			tools.FileWriteTool(),
 		},
-		Instruction: `You are a Go Developer. Implement code from the design below. Use fileWrite to save files. Work autonomously.
+		Instruction: `You are a Go Developer. Implement code from the design below. Use fileWrite to save files. Work completely autonomously without asking questions or waiting for approval.
 
 **Design:**
 {design}
@@ -177,7 +231,7 @@ func newCodeWriterAgent(model model.LLM) (agent.Agent, error) {
 path: "pkg/user/user.go"
 content: "package user\n\n// User represents...\ntype User struct {...}"
 
-Generate and save all files now.`,
+**CRITICAL: You MUST generate and save ALL files now. Do not stop until every file from the design is created. Do not ask for confirmation. Complete the entire implementation.**`,
 		Description: "Writes initial Go code based on a specification.",
 		OutputKey:   "generated_code",
 	})
@@ -192,7 +246,7 @@ func newTDDExpertAgent(model model.LLM) (agent.Agent, error) {
 			tools.FileReadTool(),
 			tools.FileWriteTool(),
 		},
-		Instruction: `You are a Go Testing Expert. Write tests for code files. Target >85% coverage. Use fileRead to read code, fileWrite to save tests. Work autonomously.
+		Instruction: `You are a Go Testing Expert. Write tests for code files. Target >85% coverage. Use fileRead to read code, fileWrite to save tests. Work completely autonomously without requesting input.
 
 **Code Reference:**
 {generated_code}
@@ -238,7 +292,7 @@ for _, tt := range tests {
 path: "pkg/user/user_test.go"
 content: "package user_test\n\nimport \"testing\"\n\nfunc TestUser_Valid(t *testing.T) {...}"
 
-Create all test files now.`,
+**MANDATORY: Create ALL test files now. Do not stop until every code file has corresponding tests. Do not ask for permission. Complete all test generation immediately.**`,
 		Description: "Writes comprehensive Go tests following TDD best practices.",
 		OutputKey:   "test_code",
 	})
@@ -252,7 +306,7 @@ func newCodeReviewerAgent(model model.LLM) (agent.Agent, error) {
 		Tools: []tool.Tool{
 			tools.FileReadTool(),
 		},
-		Instruction: `You are a Senior Go Code Reviewer. Review all code files for correctness, quality, and best practices. Use fileRead to examine files. Work autonomously.
+		Instruction: `You are a Senior Go Code Reviewer. Review all code files for correctness, quality, and best practices. Use fileRead to examine files. Work completely autonomously without asking questions.
 
 **Tools:**
 - fileRead: Read code files for review
@@ -288,7 +342,9 @@ func newCodeReviewerAgent(model model.LLM) (agent.Agent, error) {
 
 If no issues: "No major issues found. Code follows Go best practices."
 
-Be specific, constructive, and actionable.`,
+Be specific, constructive, and actionable.
+
+**REQUIRED: Complete the full review now. Read ALL files and provide comprehensive feedback. Do not ask for clarification. Finish the entire code review process immediately.**`,
 		Description: "Reviews code and provides feedback.",
 		OutputKey:   "review_comments",
 	})

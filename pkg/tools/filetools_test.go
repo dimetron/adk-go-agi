@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -113,22 +112,9 @@ func TestFileReadTool(t *testing.T) {
 			// Setup test file
 			tt.setupFunc(t, workspaceDir)
 
-			// Create the tool with custom workspace
-			tool := NewFileReadToolWithWorkspace(workspaceDir)
-
-			// Execute the tool
-			ctx := context.Background()
+			// Execute the file read directly
 			input := FileReadInput{Path: tt.relativePath}
-
-			// Get the function from the tool
-			fn, ok := tool.(interface {
-				Execute(ctx context.Context, input FileReadInput) (*FileReadOutput, error)
-			})
-			if !ok {
-				t.Fatal("tool does not implement expected interface")
-			}
-
-			output, err := fn.Execute(ctx, input)
+			output, err := executeFileRead(workspaceDir, input)
 
 			// Check error expectations
 			if (err != nil) != tt.wantErr {
@@ -245,25 +231,12 @@ func TestFileWriteTool(t *testing.T) {
 			// Setup test
 			tt.setupFunc(t, workspaceDir)
 
-			// Create the tool with custom workspace
-			tool := NewFileWriteToolWithWorkspace(workspaceDir)
-
-			// Execute the tool
-			ctx := context.Background()
+			// Execute the file write directly
 			input := FileWriteInput{
 				Path:    tt.relativePath,
 				Content: tt.content,
 			}
-
-			// Get the function from the tool
-			fn, ok := tool.(interface {
-				Execute(ctx context.Context, input FileWriteInput) (*FileWriteOutput, error)
-			})
-			if !ok {
-				t.Fatal("tool does not implement expected interface")
-			}
-
-			output, err := fn.Execute(ctx, input)
+			output, err := executeFileWrite(workspaceDir, input)
 
 			// Check error expectations
 			if (err != nil) != tt.wantErr {
@@ -312,25 +285,16 @@ func TestFileReadWrite_Integration(t *testing.T) {
 		_ = os.RemoveAll(path)
 	}(workspaceDir)
 
-	ctx := context.Background()
 	relativePath := "integration.txt"
 	originalContent := "Original content"
 
 	// Write content
-	writeTool := NewFileWriteToolWithWorkspace(workspaceDir)
 	writeInput := FileWriteInput{
 		Path:    relativePath,
 		Content: originalContent,
 	}
 
-	writeFn, ok := writeTool.(interface {
-		Execute(ctx context.Context, input FileWriteInput) (*FileWriteOutput, error)
-	})
-	if !ok {
-		t.Fatal("write tool does not implement expected interface")
-	}
-
-	writeOutput, err := writeFn.Execute(ctx, writeInput)
+	writeOutput, err := executeFileWrite(workspaceDir, writeInput)
 	if err != nil {
 		t.Fatalf("failed to write file: %v", err)
 	}
@@ -340,17 +304,9 @@ func TestFileReadWrite_Integration(t *testing.T) {
 	}
 
 	// Read content back
-	readTool := NewFileReadToolWithWorkspace(workspaceDir)
 	readInput := FileReadInput{Path: relativePath}
 
-	readFn, ok := readTool.(interface {
-		Execute(ctx context.Context, input FileReadInput) (*FileReadOutput, error)
-	})
-	if !ok {
-		t.Fatal("read tool does not implement expected interface")
-	}
-
-	readOutput, err := readFn.Execute(ctx, readInput)
+	readOutput, err := executeFileRead(workspaceDir, readInput)
 	if err != nil {
 		t.Fatalf("failed to read file: %v", err)
 	}
@@ -363,13 +319,17 @@ func TestFileReadWrite_Integration(t *testing.T) {
 	updatedContent := "Updated content"
 	writeInput.Content = updatedContent
 
-	writeOutput, err = writeFn.Execute(ctx, writeInput)
+	writeOutput, err = executeFileWrite(workspaceDir, writeInput)
 	if err != nil {
 		t.Fatalf("failed to update file: %v", err)
 	}
 
+	if !writeOutput.Success {
+		t.Error("update write failed")
+	}
+
 	// Read updated content
-	readOutput, err = readFn.Execute(ctx, readInput)
+	readOutput, err = executeFileRead(workspaceDir, readInput)
 	if err != nil {
 		t.Fatalf("failed to read updated file: %v", err)
 	}
@@ -462,6 +422,56 @@ func TestResolveWorkspacePath_Security(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestFileReadTool_ToolCreation tests that the tool creation functions work correctly
+func TestFileReadTool_ToolCreation(t *testing.T) {
+	t.Run("default workspace", func(t *testing.T) {
+		tool := FileReadTool()
+		if tool == nil {
+			t.Fatal("FileReadTool() returned nil")
+		}
+	})
+
+	t.Run("custom workspace", func(t *testing.T) {
+		workspaceDir, err := os.MkdirTemp("", "filetools-creation-*")
+		if err != nil {
+			t.Fatalf("failed to create workspace dir: %v", err)
+		}
+		defer func(path string) {
+			_ = os.RemoveAll(path)
+		}(workspaceDir)
+
+		tool := NewFileReadToolWithWorkspace(workspaceDir)
+		if tool == nil {
+			t.Fatal("NewFileReadToolWithWorkspace() returned nil")
+		}
+	})
+}
+
+// TestFileWriteTool_ToolCreation tests that the tool creation functions work correctly
+func TestFileWriteTool_ToolCreation(t *testing.T) {
+	t.Run("default workspace", func(t *testing.T) {
+		tool := FileWriteTool()
+		if tool == nil {
+			t.Fatal("FileWriteTool() returned nil")
+		}
+	})
+
+	t.Run("custom workspace", func(t *testing.T) {
+		workspaceDir, err := os.MkdirTemp("", "filetools-creation-*")
+		if err != nil {
+			t.Fatalf("failed to create workspace dir: %v", err)
+		}
+		defer func(path string) {
+			_ = os.RemoveAll(path)
+		}(workspaceDir)
+
+		tool := NewFileWriteToolWithWorkspace(workspaceDir)
+		if tool == nil {
+			t.Fatal("NewFileWriteToolWithWorkspace() returned nil")
+		}
+	})
 }
 
 // contains is a helper function to check if a string contains a substring

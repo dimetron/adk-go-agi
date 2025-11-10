@@ -56,6 +56,81 @@ type FileWriteOutput struct {
 	Error string `json:"error,omitempty"`
 }
 
+// executeFileRead is the core logic for reading files, extracted for testability
+func executeFileRead(workspaceDir string, input FileReadInput) (*FileReadOutput, error) {
+	start := time.Now()
+	slog.Info("Starting file read operation",
+		"path", input.Path,
+		"workspace", workspaceDir)
+
+	// Validate and resolve the path within workspace
+	resolvedPath, err := resolveWorkspacePath(workspaceDir, input.Path)
+	if err != nil {
+		slog.Error("Failed to resolve path",
+			"path", input.Path,
+			"error", err)
+		return nil, fmt.Errorf("failed to resolve path: %w", err)
+	}
+
+	// Check file size before reading to prevent reading huge files
+	info, err := os.Stat(resolvedPath)
+	if err != nil {
+		slog.Error("Failed to stat file",
+			"path", input.Path,
+			"resolved_path", resolvedPath,
+			"error", err)
+		return nil, fmt.Errorf("failed to read file %s: %w", input.Path, err)
+	}
+
+	if info.Size() > MaxFileSize {
+		slog.Warn("File too large",
+			"path", input.Path,
+			"size_bytes", info.Size(),
+			"max_size_bytes", MaxFileSize)
+		return nil, fmt.Errorf("file too large: %d bytes (max %d bytes)", info.Size(), MaxFileSize)
+	}
+
+	// Use context with timeout for file read operation
+	readCtx, cancel := context.WithTimeout(context.Background(), FileOperationTimeout)
+	defer cancel()
+
+	// Perform file read with timeout
+	done := make(chan struct{})
+	var content []byte
+	var readErr error
+
+	go func() {
+		content, readErr = os.ReadFile(resolvedPath)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		if readErr != nil {
+			slog.Error("Failed to read file",
+				"path", input.Path,
+				"error", readErr,
+				"duration_ms", time.Since(start).Milliseconds())
+			return nil, fmt.Errorf("failed to read file %s: %w", input.Path, readErr)
+		}
+
+		slog.Info("File read completed successfully",
+			"path", input.Path,
+			"size_bytes", len(content),
+			"duration_ms", time.Since(start).Milliseconds())
+
+		return &FileReadOutput{
+			Content: string(content),
+			Path:    input.Path,
+		}, nil
+	case <-readCtx.Done():
+		slog.Error("File read operation timed out",
+			"path", input.Path,
+			"timeout", FileOperationTimeout)
+		return nil, fmt.Errorf("file read timeout exceeded (%v)", FileOperationTimeout)
+	}
+}
+
 // FileReadTool creates a new fileRead tool that reads the content of a file within the workspace directory
 func FileReadTool() tool.Tool {
 	return NewFileReadToolWithWorkspace(DefaultWorkspaceDir)
@@ -69,93 +144,95 @@ func NewFileReadToolWithWorkspace(workspaceDir string) tool.Tool {
 			Description: "Read the content of a file from the workspace directory. All paths are relative to the workspace.",
 		},
 		func(ctx tool.Context, input FileReadInput) *FileReadOutput {
-			start := time.Now()
-			slog.Info("Starting file read operation",
-				"path", input.Path,
-				"workspace", workspaceDir)
-
-			// Validate and resolve the path within workspace
-			resolvedPath, err := resolveWorkspacePath(workspaceDir, input.Path)
+			output, err := executeFileRead(workspaceDir, input)
 			if err != nil {
-				slog.Error("Failed to resolve path",
-					"path", input.Path,
-					"error", err)
 				return &FileReadOutput{
-					Error: fmt.Sprintf("Failed to resolve path: %v", err),
+					Error: err.Error(),
 				}
 			}
-
-			// Check file size before reading to prevent reading huge files
-			info, err := os.Stat(resolvedPath)
-			if err != nil {
-				slog.Error("Failed to stat file",
-					"path", input.Path,
-					"resolved_path", resolvedPath,
-					"error", err)
-				return &FileReadOutput{
-					Error: fmt.Sprintf("Failed to stat file %s: %v", input.Path, err),
-				}
-			}
-
-			if info.Size() > MaxFileSize {
-				slog.Warn("File too large",
-					"path", input.Path,
-					"size_bytes", info.Size(),
-					"max_size_bytes", MaxFileSize)
-				return &FileReadOutput{
-					Error: fmt.Sprintf("File too large: %d bytes (max %d bytes)", info.Size(), MaxFileSize),
-				}
-			}
-
-			// Use context with timeout for file read operation
-			readCtx, cancel := context.WithTimeout(context.Background(), FileOperationTimeout)
-			defer cancel()
-
-			// Perform file read with timeout
-			done := make(chan struct{})
-			var content []byte
-			var readErr error
-
-			go func() {
-				content, readErr = os.ReadFile(resolvedPath)
-				close(done)
-			}()
-
-			select {
-			case <-done:
-				if readErr != nil {
-					slog.Error("Failed to read file",
-						"path", input.Path,
-						"error", readErr,
-						"duration_ms", time.Since(start).Milliseconds())
-					return &FileReadOutput{
-						Error: fmt.Sprintf("Failed to read file %s: %v", input.Path, readErr),
-					}
-				}
-
-				slog.Info("File read completed successfully",
-					"path", input.Path,
-					"size_bytes", len(content),
-					"duration_ms", time.Since(start).Milliseconds())
-
-				return &FileReadOutput{
-					Content: string(content),
-					Path:    input.Path,
-				}
-			case <-readCtx.Done():
-				slog.Error("File read operation timed out",
-					"path", input.Path,
-					"timeout", FileOperationTimeout)
-				return &FileReadOutput{
-					Error: fmt.Sprintf("File read timeout exceeded (%v)", FileOperationTimeout),
-				}
-			}
+			return output
 		},
 	)
 	if err != nil {
 		panic(fmt.Sprintf("failed to create fileRead tool: %v", err))
 	}
 	return t
+}
+
+// executeFileWrite is the core logic for writing files, extracted for testability
+func executeFileWrite(workspaceDir string, input FileWriteInput) (*FileWriteOutput, error) {
+	start := time.Now()
+	slog.Info("Starting file write operation",
+		"path", input.Path,
+		"content_size_bytes", len(input.Content),
+		"workspace", workspaceDir)
+
+	// Check content size before writing
+	if len(input.Content) > MaxFileSize {
+		slog.Warn("Content too large",
+			"path", input.Path,
+			"size_bytes", len(input.Content),
+			"max_size_bytes", MaxFileSize)
+		return nil, fmt.Errorf("content too large: %d bytes (max %d bytes)", len(input.Content), MaxFileSize)
+	}
+
+	// Validate and resolve the path within workspace
+	resolvedPath, err := resolveWorkspacePath(workspaceDir, input.Path)
+	if err != nil {
+		slog.Error("Failed to resolve path",
+			"path", input.Path,
+			"error", err)
+		return nil, fmt.Errorf("failed to resolve path: %w", err)
+	}
+
+	// Ensure the directory exists
+	dir := filepath.Dir(resolvedPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		slog.Error("Failed to create directory",
+			"path", input.Path,
+			"directory", dir,
+			"error", err)
+		return nil, fmt.Errorf("failed to create directory for %s: %w", input.Path, err)
+	}
+
+	// Use context with timeout for file write operation
+	writeCtx, cancel := context.WithTimeout(context.Background(), FileOperationTimeout)
+	defer cancel()
+
+	// Perform file write with timeout
+	done := make(chan struct{})
+	var writeErr error
+
+	go func() {
+		writeErr = os.WriteFile(resolvedPath, []byte(input.Content), 0644)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		if writeErr != nil {
+			slog.Error("Failed to write file",
+				"path", input.Path,
+				"error", writeErr,
+				"duration_ms", time.Since(start).Milliseconds())
+			return nil, fmt.Errorf("failed to write file %s: %w", input.Path, writeErr)
+		}
+
+		slog.Info("File write completed successfully",
+			"path", input.Path,
+			"size_bytes", len(input.Content),
+			"duration_ms", time.Since(start).Milliseconds())
+
+		return &FileWriteOutput{
+			Path:    input.Path,
+			Success: true,
+		}, nil
+	case <-writeCtx.Done():
+		slog.Error("File write operation timed out",
+			"path", input.Path,
+			"timeout", FileOperationTimeout)
+		return nil, fmt.Errorf("file write timeout exceeded (%v)", FileOperationTimeout)
+	}
 }
 
 // FileWriteTool creates a new fileWrite tool that writes content to a file within the workspace directory
@@ -171,93 +248,14 @@ func NewFileWriteToolWithWorkspace(workspaceDir string) tool.Tool {
 			Description: "Write content to a file in the workspace directory. Creates the file if it doesn't exist, or overwrites it if it does. All paths are relative to the workspace.",
 		},
 		func(ctx tool.Context, input FileWriteInput) *FileWriteOutput {
-			start := time.Now()
-			slog.Info("Starting file write operation",
-				"path", input.Path,
-				"content_size_bytes", len(input.Content),
-				"workspace", workspaceDir)
-
-			// Check content size before writing
-			if len(input.Content) > MaxFileSize {
-				slog.Warn("Content too large",
-					"path", input.Path,
-					"size_bytes", len(input.Content),
-					"max_size_bytes", MaxFileSize)
-				return &FileWriteOutput{
-					Success: false,
-					Error:   fmt.Sprintf("Content too large: %d bytes (max %d bytes)", len(input.Content), MaxFileSize),
-				}
-			}
-
-			// Validate and resolve the path within workspace
-			resolvedPath, err := resolveWorkspacePath(workspaceDir, input.Path)
+			output, err := executeFileWrite(workspaceDir, input)
 			if err != nil {
-				slog.Error("Failed to resolve path",
-					"path", input.Path,
-					"error", err)
 				return &FileWriteOutput{
 					Success: false,
-					Error:   fmt.Sprintf("Failed to resolve path: %v", err),
+					Error:   err.Error(),
 				}
 			}
-
-			// Ensure the directory exists
-			dir := filepath.Dir(resolvedPath)
-			if err := os.MkdirAll(dir, 0755); err != nil {
-				slog.Error("Failed to create directory",
-					"path", input.Path,
-					"directory", dir,
-					"error", err)
-				return &FileWriteOutput{
-					Success: false,
-					Error:   fmt.Sprintf("Failed to create directory for %s: %v", input.Path, err),
-				}
-			}
-
-			// Use context with timeout for file write operation
-			writeCtx, cancel := context.WithTimeout(context.Background(), FileOperationTimeout)
-			defer cancel()
-
-			// Perform file write with timeout
-			done := make(chan struct{})
-			var writeErr error
-
-			go func() {
-				writeErr = os.WriteFile(resolvedPath, []byte(input.Content), 0644)
-				close(done)
-			}()
-
-			select {
-			case <-done:
-				if writeErr != nil {
-					slog.Error("Failed to write file",
-						"path", input.Path,
-						"error", writeErr,
-						"duration_ms", time.Since(start).Milliseconds())
-					return &FileWriteOutput{
-						Success: false,
-						Error:   fmt.Sprintf("Failed to write file %s: %v", input.Path, writeErr),
-					}
-				}
-
-				slog.Info("File write completed successfully",
-					"path", input.Path,
-					"size_bytes", len(input.Content),
-					"duration_ms", time.Since(start).Milliseconds())
-
-				return &FileWriteOutput{
-					Path:    input.Path,
-					Success: true,
-				}
-			case <-writeCtx.Done():
-				slog.Error("File write operation timed out",
-					"path", input.Path,
-					"timeout", FileOperationTimeout)
-				return &FileWriteOutput{
-					Success: false,
-					Error:   fmt.Sprintf("File write timeout exceeded (%v)", FileOperationTimeout),
-				}
-			}
+			return output
 		},
 	)
 	if err != nil {
