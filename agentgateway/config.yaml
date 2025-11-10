@@ -1,0 +1,21 @@
+#https://agentgateway.dev/docs/llm/
+# Configuration for local Ollama instance
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - backends:
+              - ai:
+                  name: ollama
+                  provider:
+                    openAI:
+                      # Ollama model - change to any model you have installed
+                      # Examples: llama3.2, mistral, codellama, gemma2, etc.
+                      model: llama3.2
+                      # Ollama's OpenAI-compatible endpoint
+                      baseURL: http://localhost:11434/v1
+            policies:
+              # Ollama doesn't require authentication by default
+              # Remove or comment out backendAuth if not needed
+              # backendAuth:
+              #   key: "$OLLAMA_API_KEY"

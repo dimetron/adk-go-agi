@@ -1,25 +1,16 @@
-// Copyright 2025 Google LLC
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 // Package agents provides factory functions for creating ADK agent pipelines
 package agents
 
 import (
+	"fmt"
+	"log/slog"
+
+	"com.github.dimetron.adk-go-agi/pkg/tools"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/tool"
 )
 
 // PipelineConfig holds configuration for creating a code pipeline agent
@@ -32,49 +23,115 @@ type PipelineConfig struct {
 	Description string
 }
 
-// NewCodePipelineAgent creates a sequential agent pipeline for code generation, testing, review, and refactoring
+// NewCodePipelineAgent creates a sequential agent pipeline for code generation, testing, and review
 func NewCodePipelineAgent(config PipelineConfig) (agent.Agent, error) {
+	// Validate config
+	if config.Model == nil {
+		return nil, fmt.Errorf("model cannot be nil")
+	}
+
+	slog.Info("Creating code pipeline agent",
+		"name", config.Name,
+		"model", config.Model.Name())
+
 	// Set defaults
 	if config.Name == "" {
 		config.Name = "CodePipelineAgent"
 	}
+
 	if config.Description == "" {
-		config.Description = "Executes a sequence of code writing, test generation, reviewing, and refactoring."
+		config.Description = "Executes a sequence of code writing, test generation, and reviewing."
 	}
 
 	// Create sub-agents
+	slog.Info("Creating design agent")
+	newDesignAgent, err := newDesignAgent(config.Model)
+	if err != nil {
+		slog.Error("Failed to create design agent", "error", err)
+		return nil, err
+	}
+
+	// Create sub-agents
+	slog.Info("Creating code writer agent")
 	codeWriterAgent, err := newCodeWriterAgent(config.Model)
 	if err != nil {
+		slog.Error("Failed to create code writer agent", "error", err)
 		return nil, err
 	}
 
+	slog.Info("Creating TDD expert agent")
 	tddExpertAgent, err := newTDDExpertAgent(config.Model)
 	if err != nil {
+		slog.Error("Failed to create TDD expert agent", "error", err)
 		return nil, err
 	}
 
+	slog.Info("Creating code reviewer agent")
 	codeReviewerAgent, err := newCodeReviewerAgent(config.Model)
 	if err != nil {
+		slog.Error("Failed to create code reviewer agent", "error", err)
 		return nil, err
 	}
 
-	codeRefactorerAgent, err := newCodeRefactorerAgent(config.Model)
-	if err != nil {
-		return nil, err
-	}
+	slog.Info("Assembling sequential pipeline agent",
+		"sub_agents", 4,
+		"pipeline_name", config.Name)
 
 	// Create the sequential pipeline agent
 	return sequentialagent.New(sequentialagent.Config{
 		AgentConfig: agent.Config{
 			Name: config.Name,
 			SubAgents: []agent.Agent{
+				newDesignAgent,
 				codeWriterAgent,
 				tddExpertAgent,
 				codeReviewerAgent,
-				codeRefactorerAgent,
 			},
 			Description: config.Description,
 		},
+	})
+}
+
+// newDesignAgent creates a design agent that creates a new design for the code
+func newDesignAgent(model model.LLM) (agent.Agent, error) {
+	return llmagent.New(llmagent.Config{
+		Name:  "DesignAgent",
+		Model: model,
+		Instruction: `You are a Go Software Architect. Create a high-level design for a Go application. Work autonomously without asking for clarification.
+
+**Required Sections:**
+1. Architecture Overview - brief description
+2. Package Structure - list packages and key files (pkg/, internal/, cmd/)
+3. Design Patterns - which patterns to use and where
+4. Key Interfaces - main abstractions for testability
+5. Dependencies - only essential external packages with justification
+6. Error Handling & Concurrency - strategies
+
+**Format Example:**
+## Architecture Overview
+[description]
+
+## Package Structure
+- pkg/user/
+  - user.go - domain model
+  - repository.go - data access interface
+
+## Design Patterns
+- Repository: abstract data access
+
+## Key Interfaces
+- UserRepository: CRUD operations
+
+## Dependencies
+- none (use stdlib)
+
+**Constraints:**
+- Follow Go standard layout
+- Minimize dependencies
+- Target >85% test coverage
+- Include concurrency where beneficial`,
+		Description: "Creates a new design for the code.",
+		OutputKey:   "design",
 	})
 }
 
@@ -83,10 +140,44 @@ func newCodeWriterAgent(model model.LLM) (agent.Agent, error) {
 	return llmagent.New(llmagent.Config{
 		Name:  "CodeWriterAgent",
 		Model: model,
-		Instruction: `You are a Go Code Generator.
-Based *only* on the user's request, write Go code that fulfills the requirement.
-Output *only* the complete Go code block, enclosed in triple backticks ('''go ... ''').
-Do not add any other text before or after the code block.`,
+		Tools: []tool.Tool{
+			tools.FileReadTool(),
+			tools.FileWriteTool(),
+		},
+		Instruction: `You are a Go Developer. Implement code from the design below. Use fileWrite to save files. Work autonomously.
+
+**Design:**
+{design}
+
+**Tools:**
+- fileRead: Read existing files
+- fileWrite: Save code files (use this for ALL code)
+
+**Process:**
+1. Read design to identify files
+2. For each file, generate complete Go code
+3. Use fileWrite with path and content
+4. List all files created at the end
+
+**File Paths:**
+- pkg/packagename/file.go - public packages
+- internal/packagename/file.go - private packages
+- cmd/appname/main.go - main executables
+
+**Code Standards:**
+- Add godoc comments for exported items
+- Return errors as last value, wrap with %w
+- Use interfaces for abstraction
+- Prefer composition over inheritance
+- Use defer for cleanup
+- Keep functions <50 lines
+- Validate inputs
+
+**Example fileWrite:**
+path: "pkg/user/user.go"
+content: "package user\n\n// User represents...\ntype User struct {...}"
+
+Generate and save all files now.`,
 		Description: "Writes initial Go code based on a specification.",
 		OutputKey:   "generated_code",
 	})
@@ -97,32 +188,57 @@ func newTDDExpertAgent(model model.LLM) (agent.Agent, error) {
 	return llmagent.New(llmagent.Config{
 		Name:  "TDDExpertAgent",
 		Model: model,
-		Instruction: `You are a Go TDD (Test-Driven Development) Expert.
-Your task is to write comprehensive, high-quality tests for the provided Go code.
+		Tools: []tool.Tool{
+			tools.FileReadTool(),
+			tools.FileWriteTool(),
+		},
+		Instruction: `You are a Go Testing Expert. Write tests for code files. Target >85% coverage. Use fileRead to read code, fileWrite to save tests. Work autonomously.
 
-**Code to Test:**
-'''go
+**Code Reference:**
 {generated_code}
-'''
 
-**Testing Requirements:**
-1.  **Test Coverage:** Write tests that cover all major functions, methods, and code paths.
-2.  **Table-Driven Tests:** Use table-driven tests where appropriate (Go best practice).
-3.  **Edge Cases:** Include tests for edge cases, boundary conditions, and error scenarios.
-4.  **Clear Names:** Use descriptive test function names following the pattern Test<FunctionName>_<Scenario>.
-5.  **Assertions:** Use clear assertions and helpful error messages.
-6.  **Test Structure:** Follow the Arrange-Act-Assert (AAA) pattern.
-7.  **Subtests:** Use t.Run() for organizing related test cases.
-8.  **Benchmarks:** Include benchmark tests for performance-critical functions (optional but recommended).
+**Tools:**
+- fileRead: Read .go files
+- fileWrite: Save test files
 
-**Output:**
-Output *only* the complete Go test code block, enclosed in triple backticks ('''go ... ''').
-The test file should include:
-- Proper package declaration (package <name>_test or package <name>)
-- All necessary imports
-- Well-structured test functions
-- Helper functions if needed
-Do not add any other text before or after the code block.`,
+**Process:**
+1. Use fileRead on each .go file (skip _test.go)
+2. Write tests for each file
+3. Use fileWrite to save as filename_test.go in same directory
+4. List all test files created
+
+**Test Requirements:**
+- Package: use package_test for black-box tests
+- Naming: TestFunction_Scenario
+- Structure: table-driven tests with t.Run()
+- Coverage: all exported items, success/error paths, edge cases
+- Format: Arrange-Act-Assert (AAA)
+
+**Table-Driven Test Template:**
+tests := []struct {
+    name    string
+    input   Type
+    want    Type
+    wantErr bool
+}{
+    {"valid", validInput, expected, false},
+    {"invalid", badInput, nil, true},
+}
+for _, tt := range tests {
+    t.Run(tt.name, func(t *testing.T) {...})
+}
+
+**Test Cases:**
+- Happy path and errors
+- Nil/empty/zero values
+- Boundary conditions
+- Use errors.Is() for error checks
+
+**Example fileWrite:**
+path: "pkg/user/user_test.go"
+content: "package user_test\n\nimport \"testing\"\n\nfunc TestUser_Valid(t *testing.T) {...}"
+
+Create all test files now.`,
 		Description: "Writes comprehensive Go tests following TDD best practices.",
 		OutputKey:   "test_code",
 	})
@@ -133,55 +249,47 @@ func newCodeReviewerAgent(model model.LLM) (agent.Agent, error) {
 	return llmagent.New(llmagent.Config{
 		Name:  "CodeReviewerAgent",
 		Model: model,
-		Instruction: `You are an expert Go Code Reviewer.
-Your task is to provide constructive feedback on the provided code.
+		Tools: []tool.Tool{
+			tools.FileReadTool(),
+		},
+		Instruction: `You are a Senior Go Code Reviewer. Review all code files for correctness, quality, and best practices. Use fileRead to examine files. Work autonomously.
 
-**Code to Review:**
-'''go
+**Tools:**
+- fileRead: Read code files for review
+
+**Process:**
+1. Use fileRead on all .go files (code and tests)
+2. Check each file against review criteria
+3. Provide structured feedback
+
+**Code Reference:**
 {generated_code}
-'''
 
 **Review Criteria:**
-1.  **Correctness:** Does the code work as intended? Are there logic errors?
-2.  **Readability:** Is the code clear and easy to understand? Follows Go style guidelines and gofmt formatting?
-3.  **Efficiency:** Is the code reasonably efficient? Any obvious performance bottlenecks?
-4.  **Edge Cases:** Does the code handle potential edge cases or invalid inputs gracefully? Proper error handling?
-5.  **Best Practices:** Does the code follow common Go best practices and idioms?
+- Correctness: logic errors, bugs, proper error handling
+- Go Idioms: interfaces, composition, error wrapping (%w), defer usage
+- Quality: readable code, descriptive names, functions <50 lines, no duplication
+- Documentation: godoc comments for all exported items
+- Edge Cases: nil/empty/zero values, input validation
+- Performance: unnecessary allocations, efficient data structures
+- Concurrency: proper goroutine/channel usage, race condition checks
+- Security: input validation, injection prevention
+- Testability: dependency injection, minimal side effects
 
-**Output:**
-Provide your feedback as a concise, bulleted list. Focus on the most important points for improvement.
-If the code is excellent and requires no changes, simply state: "No major issues found."
-Output *only* the review comments or the "No major issues" statement.`,
+**Output Format:**
+## Critical Issues (Must Fix)
+- [file:function] [specific issue and fix]
+
+## Suggestions (Should Consider)
+- [file] [improvement with rationale]
+
+## Positive Observations
+- [what works well]
+
+If no issues: "No major issues found. Code follows Go best practices."
+
+Be specific, constructive, and actionable.`,
 		Description: "Reviews code and provides feedback.",
 		OutputKey:   "review_comments",
-	})
-}
-
-// newCodeRefactorerAgent creates a code refactorer agent that improves code based on feedback
-func newCodeRefactorerAgent(model model.LLM) (agent.Agent, error) {
-	return llmagent.New(llmagent.Config{
-		Name:  "CodeRefactorerAgent",
-		Model: model,
-		Instruction: `You are a Go Code Refactoring AI.
-Your goal is to improve the given Go code based on the provided review comments.
-
-**Original Code:**
-'''go
-{generated_code}
-'''
-
-**Review Comments:**
-{review_comments}
-
-**Task:**
-Carefully apply the suggestions from the review comments to refactor the original code.
-If the review comments state "No major issues found," return the original code unchanged.
-Ensure the final code is complete, functional, and includes necessary imports and proper documentation.
-
-**Output:**
-Output *only* the final, refactored Go code block, enclosed in triple backticks ('''go ... ''').
-Do not add any other text before or after the code block.`,
-		Description: "Refactors code based on review comments.",
-		OutputKey:   "refactored_code",
 	})
 }
